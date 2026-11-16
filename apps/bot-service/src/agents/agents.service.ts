@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { prisma } from "@platform/database";
 import type { ChatTurn } from "@platform/shared-ai";
-import { AGENT_MODELS, defaultModelFor, findModel, modelAvailability } from "./runtime/models";
+import { defaultModelFor, modelAvailability, validateModelChoice } from "./runtime/models";
 import { isToolKey, toolCatalog } from "./runtime/tools";
 import { validMcpServerIds } from "./runtime/mcp-ids";
 import { validIntegrations } from "./runtime/integration-ids";
@@ -58,7 +58,7 @@ export class AgentsService {
         name,
         systemPrompt,
         description: input.description?.trim() || null,
-        model: input.model !== undefined ? this.validModel(input.model) : await this.defaultModel(businessId),
+        model: input.model !== undefined ? await validateModelChoice(businessId, input.model) : await this.defaultModel(businessId),
         tools: input.tools !== undefined ? this.validTools(input.tools) : ["current_time", "search_knowledge"],
         maxSteps: input.maxSteps !== undefined ? this.validMaxSteps(input.maxSteps) : undefined,
         mcpServerIds: input.mcpServerIds !== undefined ? await validMcpServerIds(businessId, input.mcpServerIds) : [],
@@ -88,12 +88,6 @@ export class AgentsService {
     return (await defaultModelFor(businessId, "capable"))?.id ?? "llama3.2:3b";
   }
 
-  private validModel(model: unknown) {
-    if (typeof model !== "string" || !findModel(model)) {
-      throw new BadRequestException(`model must be one of: ${AGENT_MODELS.map((m) => m.id).join(", ")}`);
-    }
-    return model;
-  }
 
   private validTools(tools: unknown) {
     if (!Array.isArray(tools) || !tools.every((t) => typeof t === "string" && isToolKey(t))) {
@@ -141,7 +135,7 @@ export class AgentsService {
   }
 
   async update(businessId: string, id: string, updates: AgentInput) {
-    await this.require(businessId, id);
+    const existing = await this.require(businessId, id);
     if (updates.name !== undefined && !updates.name.trim()) throw new BadRequestException("name can't be empty");
     if (updates.systemPrompt !== undefined && !updates.systemPrompt.trim()) {
       throw new BadRequestException("systemPrompt can't be empty");
@@ -152,7 +146,7 @@ export class AgentsService {
         ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
         ...(updates.description !== undefined ? { description: updates.description.trim() || null } : {}),
         ...(updates.systemPrompt !== undefined ? { systemPrompt: updates.systemPrompt.trim() } : {}),
-        ...(updates.model !== undefined ? { model: this.validModel(updates.model) } : {}),
+        ...(updates.model !== undefined ? { model: await validateModelChoice(businessId, updates.model, existing.model) } : {}),
         ...(updates.tools !== undefined ? { tools: this.validTools(updates.tools) } : {}),
         ...(updates.maxSteps !== undefined ? { maxSteps: this.validMaxSteps(updates.maxSteps) } : {}),
         ...(updates.knowledgeBaseIds !== undefined ? { knowledgeBaseIds: this.validIds(updates.knowledgeBaseIds) } : {}),

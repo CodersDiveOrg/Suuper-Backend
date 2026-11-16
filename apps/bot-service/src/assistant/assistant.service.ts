@@ -1,8 +1,8 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import type Anthropic from "@anthropic-ai/sdk";
-import { prisma } from "@platform/database";
+import { brandForBusiness, prisma } from "@platform/database";
 import type { BusinessContext } from "@platform/shared-types";
-import { defaultModelFor, findModel, ollamaReachable, type AgentModel } from "../agents/runtime/models";
+import { defaultModelFor, findModel, modelLabel, ollamaReachable, type AgentModel } from "../agents/runtime/models";
 import { createProvider } from "../agents/runtime/providers";
 import type { ContentBlockParam, MessageParam } from "../agents/runtime/providers/types";
 import { withUsage } from "../usage/meter";
@@ -94,7 +94,7 @@ export class AssistantService {
     const actionNotes: string[] = [];
     let reply = "";
 
-    emit({ type: "started", model: model.label });
+    emit({ type: "started", model: modelLabel(model, (await brandForBusiness(ctx.businessId)).name) });
 
     await withUsage(ctx.businessId, "agent", async () => {
       for (let step = 0; step < MAX_STEPS; step++) {

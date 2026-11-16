@@ -9,7 +9,7 @@ import {
   type WorkflowStep,
   type WorkflowTrigger,
 } from "@platform/shared-types";
-import { AGENT_MODELS } from "../agents/runtime/models";
+import { isSelectableModel, modelAvailability } from "../agents/runtime/models";
 import { INTEGRATION_ACTIONS } from "../agents/runtime/integrations/actions";
 import { parseScheduleTrigger } from "./engine/schedule";
 import { WorkflowQueue } from "./workflow-queue";
@@ -169,7 +169,9 @@ export class WorkflowsService {
       select: { provider: true, enabled: true },
     });
     return {
-      models: AGENT_MODELS.map((m) => ({ id: m.id, label: m.label, provider: m.provider })),
+      models: (await modelAvailability(businessId))
+        .filter((m) => m.group !== "local")
+        .map((m) => ({ id: m.id, label: m.label, provider: m.provider, pro: m.pro, available: m.available, unavailableReason: m.unavailableReason })),
       apps: INTEGRATION_PROVIDERS.filter((p) => INTEGRATION_ACTIONS[p.key]?.length).map((p) => {
         const connection = connections.find((c) => c.provider === p.key);
         return {
@@ -226,7 +228,7 @@ export class WorkflowsService {
       switch (s.type) {
         case "ai": {
           const model = text("model", false);
-          if (model && !AGENT_MODELS.some((m) => m.id === model)) throw new BadRequestException(`${label}: unknown model`);
+          if (model && !isSelectableModel(model)) throw new BadRequestException(`${label}: unknown or unavailable model`);
           const knowledgeBaseIds = Array.isArray(s.knowledgeBaseIds) ? s.knowledgeBaseIds.filter((k): k is string => typeof k === "string") : [];
           return { id, type: "ai", name, prompt: text("prompt", true)!, model, knowledgeBaseIds };
         }

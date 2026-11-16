@@ -3,7 +3,7 @@ import axios from "axios";
 import { prisma } from "@platform/database";
 import { decryptJson, encryptJson } from "@platform/shared-auth";
 import type { AiKeyTestResult, AiModelsOverview, AiProviderKey, BusinessContext } from "@platform/shared-types";
-import { CLOUD_PROVIDERS, cloudProvider, findModel, modelAvailability, ollamaReachable, providerKey } from "../agents/runtime/models";
+import { CLOUD_PROVIDERS, cloudProvider, validateModelChoice, modelAvailability, ollamaReachable, providerKey } from "../agents/runtime/models";
 
 const TEST_TIMEOUT_MS = 10_000;
 
@@ -105,10 +105,9 @@ export class AiModelsService {
 
   /** null: pick automatically (the first model with a usable key). */
   async setDefaultModel(businessId: string, model: unknown) {
-    if (model !== null && (typeof model !== "string" || !findModel(model))) {
-      throw new BadRequestException("model must be one of the listed models, or null");
-    }
-    await prisma.business.update({ where: { id: businessId }, data: { defaultModel: model } });
+    const business = await prisma.business.findUnique({ where: { id: businessId }, select: { defaultModel: true } });
+    const chosen = model === null ? null : await validateModelChoice(businessId, model, business?.defaultModel);
+    await prisma.business.update({ where: { id: businessId }, data: { defaultModel: chosen } });
     return this.overview(businessId);
   }
 

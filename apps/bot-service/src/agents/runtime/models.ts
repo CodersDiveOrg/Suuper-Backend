@@ -1,5 +1,5 @@
 import { BadRequestException, Logger } from "@nestjs/common";
-import { prisma } from "@platform/database";
+import { brandForBusiness, effectivePlan, prisma } from "@platform/database";
 import { decryptJson, encryptJson, refreshOAuthSecrets } from "@platform/shared-auth";
 
 const oauthLogger = new Logger("IntegrationOAuth");
@@ -33,7 +33,41 @@ export interface AgentModel {
   fallbacks?: boolean;
   /** USD per million input / output tokens, for cost estimates. Local models are free. */
   pricing: { input: number; output: number };
+  /**
+   * Switched off for now, with the reason people see. A disabled model can't be
+   * picked, and anything still set to it gets this message instead of a provider error.
+   */
+  disabled?: string;
+  /**
+   * Customers see Gemini models as the platform's own tiers ("Suuper 2.0 Lite"),
+   * named after the workspace's brand. Models without a tier are "Flex" (Claude,
+   * GPT: own API key only) or local.
+   */
+  tier?: { name: string; description: string; pro: boolean };
 }
+
+/** Plans that unlock Pro models (the top tiers and Flex). */
+const PRO_PLAN_KEYS = new Set(["pro"]);
+
+export type ModelGroup = "tier" | "flex" | "local";
+
+export function modelGroup(model: AgentModel): ModelGroup {
+  if (model.tier) return "tier";
+  return model.provider === "ollama" ? "local" : "flex";
+}
+
+/** Needs the Pro plan: Pro tiers and every Flex model. */
+export function isProModel(model: AgentModel): boolean {
+  return modelGroup(model) === "flex" || !!model.tier?.pro;
+}
+
+/** The name people see: "<Brand> 2.0 Lite" for tiers, the real name otherwise. */
+export function modelLabel(model: AgentModel, brandName: string): string {
+  return model.tier ? `${brandName} ${model.tier.name}` : model.label;
+}
+
+/** Shown for Gemini models the free tier of Google's API doesn't serve (Google reports a limit of 0). */
+const GEMINI_PAID_ONLY = "Not available yet: this Gemini model needs a paid Google API plan. Pick another model.";
 
 // The models an agent can be set to. Order is the order shown in the UI.
 export const AGENT_MODELS: AgentModel[] = [
@@ -92,6 +126,8 @@ export const AGENT_MODELS: AgentModel[] = [
     provider: "gemini",
     description: "Google's most capable, for multi-step work with tools.",
     pricing: { input: 2, output: 10 },
+    disabled: GEMINI_PAID_ONLY,
+    tier: { name: "2.0 Max", description: "High-performance agent designed for complex tasks.", pro: true },
   },
   {
     id: "gemini-3.8-flash",
@@ -99,6 +135,7 @@ export const AGENT_MODELS: AgentModel[] = [
     provider: "gemini",
     description: "Fast and capable for everyday bots and agents.",
     pricing: { input: 0.75, output: 3.75 },
+    tier: { name: "2.0", description: "Versatile agent capable of most tasks.", pro: true },
   },
   {
     id: "gemini-3.5-flash-lite",
@@ -106,6 +143,7 @@ export const AGENT_MODELS: AgentModel[] = [
     provider: "gemini",
     description: "Google's cheapest, for simple tasks.",
     pricing: { input: 0.3, output: 2.5 },
+    tier: { name: "2.0 Lite", description: "A lightweight agent for everyday tasks.", pro: false },
   },
   {
     id: "llama3.2:3b",
@@ -132,6 +170,14 @@ export function estimateCostUsd(modelId: string, inputTokens: number, outputToke
 
 export function findModel(id: string): AgentModel | undefined {
   return AGENT_MODELS.find((m) => m.id === id);
+}
+
+/** The models that can be picked right now (not disabled). */
+export const ENABLED_MODELS = AGENT_MODELS.filter((m) => !m.disabled);
+
+/** Whether `id` is a model that can be picked (known and not disabled). */
+export function isSelectableModel(id: unknown): id is string {
+  return typeof id === "string" && !!findModel(id) && !findModel(id)!.disabled;
 }
 
 /** Decrypted credentials of an enabled integration, or null. Never sent to clients. */
@@ -200,14 +246,63 @@ export async function anthropicApiKey(businessId: string): Promise<string | null
 // When the business hasn't picked a default model, the first of these with a usable key wins.
 const DEFAULT_FALLBACKS = {
   /** Agents do multi-step tool work: the capable models. */
-  capable: ["claude-opus-5-5", "gpt-6.1-sol", "gemini-4-argon"],
+  capable: ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"],
   /** App helpers and drafts: cheap, fast models. */
-  cheap: ["claude-haiku-4-5", "gemini-3.5-flash-lite", "gpt-6-luna"],
+  cheap: ["gemini-3.5-flash-lite", "gemini-3.8-flash"],
 };
 
 async function usable(businessId: string, model: AgentModel | undefined): Promise<boolean> {
-  if (!model) return false;
-  return model.provider === "ollama" || !!(await providerKey(businessId, model.provider));
+  return !!model && (await modelAccessProblem(businessId, model)) === null;
+}
+
+interface AccessContext {
+  pro: boolean;
+  keys: Map<CloudProvider, { apiKey: string; ownKey: boolean } | null>;
+  /** Unknown (undefined) when not checked: then local models count as usable. */
+  ollamaUp?: boolean;
+}
+
+/** Why this business can't use a model right now, or null when it can. */
+function accessProblem(model: AgentModel, ctx: AccessContext): string | null {
+  if (model.disabled) return model.disabled;
+  if (isProModel(model) && !ctx.pro) return "Available on the Pro plan. Upgrade to use it.";
+  if (model.provider === "ollama") return ctx.ollamaUp === false ? "The local Ollama server isn't reachable." : null;
+  const key = ctx.keys.get(model.provider);
+  const provider = cloudProvider(model.provider)!.name;
+  if (modelGroup(model) === "flex") {
+    return key?.ownKey ? null : `Add your own ${provider} API key under Settings → AI Models to use ${model.label}.`;
+  }
+  return key ? null : `Add a ${provider} key under Settings → AI Models to use this model.`;
+}
+
+async function onProPlan(businessId: string) {
+  return PRO_PLAN_KEYS.has((await effectivePlan(businessId)).key);
+}
+
+/** Why this business can't use the model right now (plan, keys, disabled), or null. */
+export async function modelAccessProblem(businessId: string, model: AgentModel): Promise<string | null> {
+  const [pro, key] = await Promise.all([
+    onProPlan(businessId),
+    model.provider === "ollama" ? null : providerKey(businessId, model.provider),
+  ]);
+  const keys = new Map<CloudProvider, { apiKey: string; ownKey: boolean } | null>();
+  if (model.provider !== "ollama") keys.set(model.provider, key);
+  return accessProblem(model, { pro, keys });
+}
+
+/**
+ * Checks a model someone picked for a bot, agent or the workspace default.
+ * Keeping the current value is always fine, so older bots (on a local model,
+ * or a model that's since been locked) can still be edited.
+ */
+export async function validateModelChoice(businessId: string, model: unknown, current?: string | null): Promise<string> {
+  const found = typeof model === "string" ? findModel(model) : undefined;
+  if (!found) throw new BadRequestException("Pick one of the listed models.");
+  if (found.id === current) return found.id;
+  if (modelGroup(found) === "local") throw new BadRequestException("Pick one of the listed models.");
+  const problem = await modelAccessProblem(businessId, found);
+  if (problem) throw new BadRequestException(problem);
+  return found.id;
 }
 
 /**
@@ -247,23 +342,35 @@ export interface ModelAvailability {
   /** Whose key it runs on: the business's own, Suuper's, or the local server. */
   keySource?: "business" | "platform" | "local";
   unavailableReason?: string;
+  /** "tier": the platform's own models; "flex": bring your own key; "local": not offered in pickers. */
+  group: ModelGroup;
+  /** Needs the Pro plan. */
+  pro: boolean;
 }
 
-/** Every model, and whether this business can use it right now. */
+/** Every model, named for this business's brand, and whether it can use each right now. */
 export async function modelAvailability(businessId: string): Promise<ModelAvailability[]> {
-  const [keys, ollamaUp] = await Promise.all([
+  const [keys, ollamaUp, pro, brand] = await Promise.all([
     Promise.all(CLOUD_PROVIDERS.map(async (p) => [p.key, await providerKey(businessId, p.key)] as const)),
     ollamaReachable(),
+    onProPlan(businessId),
+    brandForBusiness(businessId),
   ]);
-  const keyOf = new Map(keys);
+  const ctx: AccessContext = { pro, keys: new Map(keys), ollamaUp };
   return AGENT_MODELS.map((m) => {
-    const base = { id: m.id, label: m.label, provider: m.provider, description: m.description, pricing: m.pricing };
-    if (m.provider === "ollama") {
-      return { ...base, available: ollamaUp, keySource: "local" as const, unavailableReason: ollamaUp ? undefined : "The local Ollama server isn't reachable." };
-    }
-    const key = keyOf.get(m.provider);
-    return key
-      ? { ...base, available: true, keySource: key.ownKey ? ("business" as const) : ("platform" as const) }
-      : { ...base, available: false, unavailableReason: `Add your ${cloudProvider(m.provider)!.name} key under Settings → AI Models to use ${m.label}.` };
+    const problem = accessProblem(m, ctx);
+    const key = m.provider === "ollama" ? null : ctx.keys.get(m.provider);
+    return {
+      id: m.id,
+      label: modelLabel(m, brand.name),
+      provider: m.provider,
+      description: m.tier?.description ?? m.description,
+      pricing: m.pricing,
+      group: modelGroup(m),
+      pro: isProModel(m),
+      available: problem === null,
+      keySource: m.provider === "ollama" ? ("local" as const) : key ? (key.ownKey ? ("business" as const) : ("platform" as const)) : undefined,
+      ...(problem ? { unavailableReason: problem } : {}),
+    };
   });
 }

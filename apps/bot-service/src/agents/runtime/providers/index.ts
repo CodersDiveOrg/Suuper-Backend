@@ -1,4 +1,5 @@
-import { requireProviderKey, type AgentModel } from "../models";
+import { BadRequestException } from "@nestjs/common";
+import { modelAccessProblem, requireProviderKey, type AgentModel } from "../models";
 import { AnthropicProvider } from "./anthropic";
 import { GeminiProvider } from "./gemini";
 import { OllamaProvider } from "./ollama";
@@ -11,6 +12,10 @@ import type { ModelProvider } from "./types";
  * Create one per run: OpenAI and Gemini keep per-run state (reasoning items, signatures).
  */
 export async function createProvider(businessId: string, model: AgentModel): Promise<ModelProvider> {
+  // Disabled, or locked to the Pro plan / an own key, but still set on an older
+  // bot, agent or workflow step: say so instead of the provider's error.
+  const problem = await modelAccessProblem(businessId, model);
+  if (problem) throw new BadRequestException(problem);
   if (model.provider === "ollama") return new OllamaProvider();
   const { apiKey, ownKey } = await requireProviderKey(businessId, model.provider);
   switch (model.provider) {

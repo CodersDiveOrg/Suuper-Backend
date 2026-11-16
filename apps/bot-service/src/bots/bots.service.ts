@@ -11,7 +11,7 @@ import {
   type WidgetOverview,
   type WidgetSettings,
 } from "@platform/shared-types";
-import { AGENT_MODELS, findModel } from "../agents/runtime/models";
+import { defaultModelFor, findModel, validateModelChoice } from "../agents/runtime/models";
 import { createProvider } from "../agents/runtime/providers";
 import { OllamaProvider } from "../agents/runtime/providers/ollama";
 import { buildToolSet } from "../agents/runtime/toolset";
@@ -143,7 +143,7 @@ export class BotsService {
         integrations: validIntegrations(integrations ?? []),
         knowledgeBaseIds,
         // No model given: the business default from Settings → AI Models, if one is set.
-        ...(model !== undefined ? { model: this.validModel(model) } : await this.businessDefaultModel(businessId)),
+        ...(model !== undefined ? { model: await validateModelChoice(businessId, model) } : await this.businessDefaultModel(businessId)),
       },
     });
     return this.serialize(bot);
@@ -163,12 +163,12 @@ export class BotsService {
     id: string,
     updates: { name?: string; systemPrompt?: string; knowledgeBaseIds?: string[]; mcpServerIds?: unknown; model?: unknown; integrations?: unknown },
   ) {
-    await this.require(businessId, id);
+    const existing = await this.require(businessId, id);
     const bot = await prisma.bot.update({
       where: { id },
       data: {
         ...(updates.mcpServerIds !== undefined ? { mcpServerIds: await validMcpServerIds(businessId, updates.mcpServerIds) } : {}),
-        ...(updates.model !== undefined ? { model: this.validModel(updates.model) } : {}),
+        ...(updates.model !== undefined ? { model: await validateModelChoice(businessId, updates.model, existing.model) } : {}),
         ...(updates.integrations !== undefined ? { integrations: validIntegrations(updates.integrations) } : {}),
         ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
         ...(updates.systemPrompt !== undefined ? { systemPrompt: updates.systemPrompt.trim() } : {}),
@@ -261,16 +261,11 @@ export class BotsService {
   }
 
   private async businessDefaultModel(businessId: string): Promise<{ model?: string }> {
-    const business = await prisma.business.findUnique({ where: { id: businessId }, select: { defaultModel: true } });
-    return business?.defaultModel && findModel(business.defaultModel) ? { model: business.defaultModel } : {};
+    // The business default if it can use it, else the cheapest tier it can use, else the local model.
+    const model = await defaultModelFor(businessId, "cheap");
+    return model ? { model: model.id } : {};
   }
 
-  private validModel(model: unknown) {
-    if (typeof model !== "string" || !findModel(model)) {
-      throw new BadRequestException(`model must be one of: ${AGENT_MODELS.map((m) => m.id).join(", ")}`);
-    }
-    return model;
-  }
 
   /** Bots with MCP servers attached run a short tool loop over those servers' tools. */
   private async sendWithTools(bot: BotRow, userContent: string, knowledge: KnowledgeSearchResult) {

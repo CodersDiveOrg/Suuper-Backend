@@ -26,6 +26,10 @@ export interface AiModelInfo {
   available: boolean;
   keySource?: "business" | "platform" | "local";
   unavailableReason?: string;
+  /** "tier": the platform's own models (named after the brand); "flex": own API key; "local": not offered in pickers. */
+  group: "tier" | "flex" | "local";
+  /** Needs the Pro plan. */
+  pro: boolean;
 }
 
 export interface AiModelsOverview {
