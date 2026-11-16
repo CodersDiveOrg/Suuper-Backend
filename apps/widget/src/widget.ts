@@ -33,7 +33,9 @@ function readConfig() {
 
   return {
     widgetKey,
-    gatewayOrigin: new URL(script.src).origin,
+    // The gateway base is wherever widget.js was served from, including any
+    // path prefix (production serves it at /api/widget.js behind nginx).
+    gatewayOrigin: new URL(".", script.src).href.replace(/\/+$/, ""),
     themeColor: script.dataset.themeColor ?? "#111827",
     greeting: script.dataset.greeting ?? "Hi! How can I help you today?",
     position: script.dataset.position === "bottom-left" ? "bottom-left" : "bottom-right",
