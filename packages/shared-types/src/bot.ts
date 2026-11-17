@@ -24,7 +24,7 @@ export interface WidgetAppearance {
 }
 
 export const DEFAULT_WIDGET_APPEARANCE: WidgetAppearance = {
-  color: "#111827",
+  color: "#00c2a8",
   title: "Chat with us",
   greeting: "Hi! How can I help you today?",
   placeholder: "Type a message…",
