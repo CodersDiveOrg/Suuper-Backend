@@ -167,6 +167,8 @@ function styles(config: WidgetConfig, side: "left" | "right") {
       flex: 1; min-height: 200px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
       font-size: 14px; line-height: 1.5; scrollbar-width: thin; scrollbar-color: rgba(247, 246, 242, .2) transparent;
     }
+    /* A flex column that scrolls: without this, cards (overflow: hidden) shrink to nothing when there are several. */
+    .messages > * { flex-shrink: 0; }
     .bubble { padding: 11px 14px; white-space: pre-wrap; overflow-wrap: anywhere; animation: pop .3s ease both; }
     .bubble.assistant { align-self: flex-start; max-width: 88%; border-radius: 16px 16px 16px 5px; background: ${accent}; color: ${onAccent}; }
     .bubble.greeting { align-self: flex-start; max-width: 88%; border-radius: 16px 16px 16px 5px; background: #161d1a; color: #f7f6f2; }

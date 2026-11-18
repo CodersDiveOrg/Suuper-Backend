@@ -12,6 +12,7 @@ import {
   type WidgetSettings,
 } from "@platform/shared-types";
 import { defaultModelFor, findModel, validateModelChoice } from "../agents/runtime/models";
+import { PRODUCT_PICK_INSTRUCTION, pickShownProducts } from "./product-picks";
 import { createProvider } from "../agents/runtime/providers";
 import { OllamaProvider } from "../agents/runtime/providers/ollama";
 import { buildToolSet } from "../agents/runtime/toolset";
@@ -221,7 +222,7 @@ export class BotsService {
    * exchange for analytics (see chat-log.ts). A limit hit is thrown before
    * anything runs and isn't logged as a chat.
    */
-  private async logged<T extends { reply: string; products?: unknown[]; passages?: unknown[] }>(
+  private async logged<T extends { reply: string; products?: unknown[]; passages?: unknown[]; retrievedProducts?: number }>(
     bot: BotRow,
     meta: BotChatMeta,
     message: string,
@@ -234,7 +235,8 @@ export class BotsService {
     try {
       const result = await withUsage(bot.businessId, "bot", answer);
       recordBotReply(bot.businessId);
-      const found = (result.products?.length ?? 0) + (result.passages?.length ?? 0) > 0;
+      // What the search found, not just the cards shown: an answer from the catalog with no card still used it.
+      const found = (result.retrievedProducts ?? result.products?.length ?? 0) + (result.passages?.length ?? 0) > 0;
       await record(result.reply, replyOutcome(result.reply, bot.knowledgeBaseIds.length > 0, found));
       return result;
     } catch (err) {
@@ -244,7 +246,15 @@ export class BotsService {
   }
 
   private async sendMessageForBot(bot: BotRow, message: string, knowledge: KnowledgeSearchResult, history: ChatHistoryTurn[] = []) {
-    const prompt = buildKnowledgePrompt(message, knowledge, "Customer question");
+    const answered = await this.answerForBot(bot, message, knowledge, history);
+    // Only the products the answer recommends become cards, not every search hit.
+    const shown = pickShownProducts(answered.reply, knowledge.products);
+    return { ...answered, reply: shown.reply, products: shown.products, retrievedProducts: knowledge.products.length };
+  }
+
+  private async answerForBot(bot: BotRow, message: string, knowledge: KnowledgeSearchResult, history: ChatHistoryTurn[]) {
+    const prompt =
+      buildKnowledgePrompt(message, knowledge, "Customer question") + (knowledge.products.length > 0 ? PRODUCT_PICK_INSTRUCTION : "");
     // Tools, or a cloud model, go through the provider layer; plain local bots keep the simple path.
     if (bot.mcpServerIds.length > 0 || bot.integrations.length > 0 || (findModel(bot.model)?.provider ?? "ollama") !== "ollama") {
       const result = await this.sendWithTools(bot, withHistory(prompt, history), knowledge);
